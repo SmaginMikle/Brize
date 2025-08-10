@@ -27,7 +27,10 @@ class InvoiceProcessor:
         try:
             logger.info("Загружаю LayoutLMv3 модель...")
             self.processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base")
-            self.model = AutoModelForTokenClassification.from_pretrained("microsoft/layoutlmv3-base").to("cpu")
+            self.model = AutoModelForTokenClassification.from_pretrained("microsoft/layoutlmv3-base")
+            # Явно перемещаем модель на CPU
+            self.model = self.model.to("cpu")
+            self.model.eval()  # Устанавливаем режим оценки
             logger.info("LayoutLMv3 модель загружена успешно")
         except Exception as e:
             logger.error(f"Ошибка загрузки LayoutLMv3: {e}")
