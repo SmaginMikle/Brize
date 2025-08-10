@@ -58,7 +58,7 @@ class InvoiceProcessor:
                 'field': 'quantity',
                 'validation_type': 'number',
                 'rule': '>0',
-                'message': 'Количество должно быть положительным числом'
+                'message': 'Количество должно быть положительным числом '
             }
         ]
 

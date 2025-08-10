@@ -1,0 +1,17 @@
+{
+  "telegram": {
+    "token": "8324735152:AAFt-38PProQw4QqWo1t5oYl3SgUt_EBpts",
+    "admin_users": [840655013],
+    "max_file_size": 20971520
+  },
+  "training": {
+    "min_samples_for_training": 10,
+    "auto_training_enabled": true,
+    "training_data_path": "training_data"
+  },
+  "processing": {
+    "supported_formats": [".pdf", ".jpg", ".jpeg", ".png"],
+    "max_pages": 10,
+    "ocr_languages": "rus+eng"
+  }
+}
