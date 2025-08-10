@@ -140,6 +140,7 @@ class InvoiceProcessor:
                 if not token.startswith("["):
                     filtered_predictions.append((token, prediction.item()))
 
+            logger.info("Обработано при использовании LayoutLMv3")
             return filtered_predictions
 
         except Exception as e:
@@ -336,6 +337,8 @@ class InvoiceProcessor:
 
             # Распознавание с помощью LayoutLMv3 (если доступно)
             layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
+            logger.info("Распознанный текст с изображения (первые 500 символов):")
+            logger.info(layout_predictions[:500] if len(layout_predictions) > 500 else layout_predictions)
 
             # OCR
             text = self.ocr_image(processed_image, lang)
