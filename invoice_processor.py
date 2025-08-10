@@ -23,7 +23,7 @@ class InvoiceProcessor:
         self.templates_dir = templates_dir
         self.validation_rules = self.load_validation_rules()
 
-        # Загрузка LayoutLMv3 (без указания ревизии)
+        # Загрузка LayoutLMv3
         try:
             logger.info("Загружаю LayoutLMv3 модель...")
             self.processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base")
@@ -97,10 +97,6 @@ class InvoiceProcessor:
         if isinstance(image, str):
             image = Image.open(image)
 
-        # Конвертируем в grayscale
-        if image.mode != 'L':
-            image = image.convert('L')
-
         # Увеличиваем резкость
         from PIL import ImageEnhance
         enhancer = ImageEnhance.Sharpness(image)
@@ -122,6 +118,10 @@ class InvoiceProcessor:
             # Убедимся, что изображение в правильном формате
             if isinstance(image, str):
                 image = Image.open(image)
+
+            # Проверяем количество каналов
+            if image.mode == 'L':  # Если изображение grayscale, преобразуем в RGB
+                image = image.convert('RGB')
 
             encoding = self.processor(image, return_tensors="pt").to("cpu")
 
