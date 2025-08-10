@@ -6,8 +6,8 @@ import logging
 from PIL import Image
 import pytesseract
 import fitz  # PyMuPDF
-import cv2
-import numpy as np
+import torch
+from transformers import AutoProcessor, AutoModelForTokenClassification
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,6 +22,11 @@ class InvoiceProcessor:
         self.config_dir = config_dir
         self.templates_dir = templates_dir
         self.validation_rules = self.load_validation_rules()
+
+        # Загрузка LayoutLMv3
+        self.processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base", revision="no_ocr")
+        self.model = AutoModelForTokenClassification.from_pretrained("microsoft/layoutlmv3-base", revision="no_ocr").to(
+            "cpu")
 
     def load_validation_rules(self):
         """Загружает правила валидации из CSV файла."""
@@ -58,7 +63,7 @@ class InvoiceProcessor:
                 'field': 'quantity',
                 'validation_type': 'number',
                 'rule': '>0',
-                'message': 'Количество должно быть положительным числом '
+                'message': 'Количество должно быть положительным числом'
             }
         ]
 
@@ -71,14 +76,12 @@ class InvoiceProcessor:
         except Exception as e:
             logger.error(f"Ошибка создания правил валидации: {e}")
 
-    def ocr_image(self, image, lang='ru'):
+    def ocr_image(self, image, lang='rus+eng'):
         """Распознаёт текст с изображения с помощью Tesseract OCR."""
         try:
-            # Используем улучшенные параметры для OCR
             custom_config = r'--oem 3 --psm 6'
             text = pytesseract.image_to_string(image, lang=lang, config=custom_config)
-            logger.info(f"OCR выполнен успешно")
-            return text
+            return text.strip()
         except Exception as e:
             logger.error(f"Ошибка OCR: {e}")
             return ""
@@ -101,19 +104,31 @@ class InvoiceProcessor:
         enhancer = ImageEnhance.Contrast(image)
         image = enhancer.enhance(1.5)
 
-        # Преобразуем в NumPy массив для OpenCV
-        numpy_image = np.array(image)
+        return image
 
-        # Уменьшаем шум
-        denoised_image = cv2.fastNlMeansDenoising(numpy_image, None, h=10, templateWindowSize=7, searchWindowSize=21)
+    def recognize_layout_with_layoutlmv3(self, image_path):
+        """Использует LayoutLMv3 для распознавания текста и структуры."""
+        try:
+            image = Image.open(image_path)
+            encoding = self.processor(image, return_tensors="pt").to("cpu")
 
-        # Бинаризация изображения (для черно-белых документов)
-        _, binary_image = cv2.threshold(denoised_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            with torch.no_grad():
+                outputs = self.model(**encoding)
+                logits = outputs.logits
 
-        # Возвращаем изображение в формате PIL
-        processed_image = Image.fromarray(binary_image)
+            predictions = torch.argmax(logits, dim=-1)
+            tokens = self.processor.tokenizer.convert_ids_to_tokens(encoding["input_ids"][0])
 
-        return processed_image
+            filtered_predictions = []
+            for token, prediction in zip(tokens, predictions[0]):
+                if not token.startswith("["):
+                    filtered_predictions.append((token, prediction.item()))
+
+            return filtered_predictions
+
+        except Exception as e:
+            logger.error(f"Ошибка при использовании LayoutLMv3: {e}")
+            return []
 
     def validate_field(self, field_name, value):
         """Валидирует значение поля по правилам."""
@@ -140,9 +155,6 @@ class InvoiceProcessor:
     def extract_items_traditional(self, text_lines):
         """Традиционное извлечение строк товаров."""
         items = []
-        processed_lines = []  # Для отладки - сохраняем обработанные строки
-
-        logger.info(f"Начинаем извлечение данных из {len(text_lines)} строк")
 
         # Пропускаем строки с заголовками
         header_keywords = ['наименование', 'товар', 'услуга', 'цена', 'колич', 'сумма', 'итого', '№']
@@ -162,25 +174,18 @@ class InvoiceProcessor:
             re.compile(r'^\s*(.+?)\s+(\d+)\s+([\d\s]+[.,]\d{2})'),
         ]
 
-        for i, line in enumerate(text_lines):
-            line = line.strip()
-            if not line:
-                continue
-
+        for line in text_lines:
             # Пропускаем строки с заголовками
             if any(word in line.lower() for word in header_keywords):
-                logger.debug(f"Пропущена строка заголовка: {line}")
                 continue
 
-            processed_lines.append(line)  # Сохраняем для отладки
-
-            for j, pattern in enumerate(patterns):
+            for i, pattern in enumerate(patterns):
                 match = pattern.search(line)
                 if match:
                     groups = match.groups()
                     item = {}
 
-                    if j == 0:  # Таблица товаров с ГОСТом
+                    if i == 0:  # Таблица товаров с ГОСТом
                         item = {
                             'номер': groups[0],
                             'наименование': groups[1].strip(),
@@ -189,16 +194,14 @@ class InvoiceProcessor:
                             'ед_изм': groups[4],
                             'количество': groups[5]
                         }
-                        logger.debug(f"Найдена строка с ГОСТ: {line}")
-                    elif j == 1:  # Таблица товаров без ГОСТа
+                    elif i == 1:  # Таблица товаров без ГОСТа
                         item = {
                             'номер': groups[0],
                             'наименование': groups[1].strip(),
                             'ед_изм': groups[2],
                             'количество': groups[3]
                         }
-                        logger.debug(f"Найдена строка без ГОСТ: {line}")
-                    elif j == 2:  # Полный формат
+                    elif i == 2:  # Полный формат
                         item = {
                             'code': groups[0],
                             'name': groups[1].strip(),
@@ -206,53 +209,38 @@ class InvoiceProcessor:
                             'quantity': groups[3],
                             'amount': groups[4].replace(' ', '')
                         }
-                        logger.debug(f"Найдена строка полного формата: {line}")
-                    elif j == 3:  # Без кода
+                    elif i == 3:  # Без кода
                         item = {
                             'name': groups[0].strip(),
                             'price': groups[1].replace(' ', ''),
                             'quantity': groups[2],
                             'amount': groups[3].replace(' ', '')
                         }
-                        logger.debug(f"Найдена строка без кода: {line}")
-                    elif j == 4:  # Код, наименование, кол-во, цена
+                    elif i == 4:  # Код, наименование, кол-во, цена
                         item = {
                             'code': groups[0],
                             'name': groups[1].strip(),
                             'quantity': groups[2],
                             'price': groups[3].replace(' ', '')
                         }
-                        logger.debug(f"Найдена строка с кодом: {line}")
-                    elif j == 5:  # Наименование, кол-во, цена
+                    elif i == 5:  # Наименование, кол-во, цена
                         item = {
                             'name': groups[0].strip(),
                             'quantity': groups[1],
                             'price': groups[2].replace(' ', '')
                         }
-                        logger.debug(f"Найдена строка наименования: {line}")
 
                     # Валидация
                     is_valid = True
-                    validation_errors = []
                     for field_name, field_value in item.items():
-                        valid, error_msg = self.validate_field(field_name, field_value)
+                        valid, _ = self.validate_field(field_name, field_value)
                         if not valid:
                             is_valid = False
-                            validation_errors.append(f"{field_name}: {error_msg}")
+                            break
 
                     if is_valid:
                         items.append(item)
-                        logger.info(f"Добавлен элемент: {item}")
-                    else:
-                        logger.warning(f"Элемент не прошел валидацию: {line}. Ошибки: {validation_errors}")
                     break  # Найдено совпадение
-                else:
-                    logger.debug(f"Шаблон {j} не подошел для строки: {line}")
-
-        logger.info(f"Извлечено {len(items)} элементов")
-        # Логируем несколько обработанных строк для отладки
-        for i, line in enumerate(processed_lines[:10]):  # Первые 10 строк
-            logger.debug(f"Обработанная строка {i + 1}: {line}")
 
         return items
 
@@ -261,7 +249,7 @@ class InvoiceProcessor:
         try:
             import fitz  # PyMuPDF
 
-            logger.info("Начинаем обработку PDF")
+            logger.info("Начинаю обработку PDF")
 
             # Открываем PDF из байтов
             pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -286,6 +274,9 @@ class InvoiceProcessor:
 
                 # Предобработка изображения
                 processed_image = self.preprocess_image(image)
+
+                # Распознавание с помощью LayoutLMv3
+                layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
 
                 # OCR
                 text = self.ocr_image(processed_image, lang)
@@ -320,12 +311,15 @@ class InvoiceProcessor:
     def process_image(self, image_bytes, lang='rus+eng'):
         """Обрабатывает изображение из байтов."""
         try:
-            logger.info("Начинаем обработку изображения")
+            logger.info("Начинаю обработку изображения")
 
             image = Image.open(BytesIO(image_bytes))
 
             # Предобработка изображения
             processed_image = self.preprocess_image(image)
+
+            # Распознавание с помощью LayoutLMv3
+            layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
 
             # OCR
             text = self.ocr_image(processed_image, lang)
