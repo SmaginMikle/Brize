@@ -23,10 +23,16 @@ class InvoiceProcessor:
         self.templates_dir = templates_dir
         self.validation_rules = self.load_validation_rules()
 
-        # Загрузка LayoutLMv3
-        self.processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base", revision="no_ocr")
-        self.model = AutoModelForTokenClassification.from_pretrained("microsoft/layoutlmv3-base", revision="no_ocr").to(
-            "cpu")
+        # Загрузка LayoutLMv3 (без указания ревизии)
+        try:
+            logger.info("Загружаю LayoutLMv3 модель...")
+            self.processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base")
+            self.model = AutoModelForTokenClassification.from_pretrained("microsoft/layoutlmv3-base").to("cpu")
+            logger.info("LayoutLMv3 модель загружена успешно")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки LayoutLMv3: {e}")
+            self.processor = None
+            self.model = None
 
     def load_validation_rules(self):
         """Загружает правила валидации из CSV файла."""
@@ -106,10 +112,17 @@ class InvoiceProcessor:
 
         return image
 
-    def recognize_layout_with_layoutlmv3(self, image_path):
+    def recognize_layout_with_layoutlmv3(self, image):
         """Использует LayoutLMv3 для распознавания текста и структуры."""
+        if not self.processor or not self.model:
+            logger.warning("LayoutLMv3 не загружен, пропускаю распознавание")
+            return []
+
         try:
-            image = Image.open(image_path)
+            # Убедимся, что изображение в правильном формате
+            if isinstance(image, str):
+                image = Image.open(image)
+
             encoding = self.processor(image, return_tensors="pt").to("cpu")
 
             with torch.no_grad():
@@ -275,7 +288,7 @@ class InvoiceProcessor:
                 # Предобработка изображения
                 processed_image = self.preprocess_image(image)
 
-                # Распознавание с помощью LayoutLMv3
+                # Распознавание с помощью LayoutLMv3 (если доступно)
                 layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
 
                 # OCR
@@ -318,7 +331,7 @@ class InvoiceProcessor:
             # Предобработка изображения
             processed_image = self.preprocess_image(image)
 
-            # Распознавание с помощью LayoutLMv3
+            # Распознавание с помощью LayoutLMv3 (если доступно)
             layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
 
             # OCR
