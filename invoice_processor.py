@@ -6,8 +6,9 @@ import logging
 from PIL import Image
 import pytesseract
 import fitz  # PyMuPDF
-import torch
-from transformers import AutoProcessor, AutoModelForTokenClassification
+from google.cloud import vision
+import io
+import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,19 +24,15 @@ class InvoiceProcessor:
         self.templates_dir = templates_dir
         self.validation_rules = self.load_validation_rules()
 
-        # Загрузка LayoutLMv3
+        # Инициализация клиента Google Cloud Vision
         try:
-            logger.info("Загружаю LayoutLMv3 модель...")
-            self.processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base")
-            self.model = AutoModelForTokenClassification.from_pretrained("microsoft/layoutlmv3-base")
-            # Явно перемещаем модель на CPU
-            self.model = self.model.to("cpu")
-            self.model.eval()  # Устанавливаем режим оценки
-            logger.info("LayoutLMv3 модель загружена успешно")
+            # Убедитесь, что у вас установлен файл учетных данных Google Cloud
+            # и установлена переменная окружения GOOGLE_APPLICATION_CREDENTIALS
+            self.vision_client = vision.ImageAnnotatorClient()
+            logger.info("Google Cloud Vision клиент инициализирован")
         except Exception as e:
-            logger.error(f"Ошибка загрузки LayoutLMv3: {e}")
-            self.processor = None
-            self.model = None
+            logger.error(f"Ошибка инициализации Google Cloud Vision: {e}")
+            self.vision_client = None
 
     def load_validation_rules(self):
         """Загружает правила валидации из CSV файла."""
@@ -111,40 +108,77 @@ class InvoiceProcessor:
 
         return image
 
-    def recognize_layout_with_layoutlmv3(self, image):
-        """Использует LayoutLMv3 для распознавания текста и структуры."""
-        if not self.processor or not self.model:
-            logger.warning("LayoutLMv3 не загружен, пропускаю распознавание")
+    def recognize_layout_with_google_vision(self, image_bytes):
+        """Использует Google Cloud Vision для распознавания текста и структуры."""
+        if not self.vision_client:
+            logger.warning("Google Cloud Vision не инициализирован, пропускаю распознавание")
             return []
 
         try:
-            # Убедимся, что изображение в правильном формате
-            if isinstance(image, str):
-                image = Image.open(image)
+            # Создаем объект изображения для Google Cloud Vision
+            image = vision.Image(content=image_bytes)
 
-            # Проверяем количество каналов
-            if image.mode == 'L':  # Если изображение grayscale, преобразуем в RGB
-                image = image.convert('RGB')
+            # Настраиваем функции распознавания
+            features = [
+                vision.Feature(type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION),
+                vision.Feature(type_=vision.Feature.Type.TABLE_DETECTION)
+            ]
 
-            encoding = self.processor(image, return_tensors="pt").to("cpu")
+            # Создаем запрос
+            request = vision.AnnotateImageRequest(image=image, features=features)
 
-            with torch.no_grad():
-                outputs = self.model(**encoding)
-                logits = outputs.logits
+            # Выполняем запрос
+            response = self.vision_client.annotate_image(request=request)
 
-            predictions = torch.argmax(logits, dim=-1)
-            tokens = self.processor.tokenizer.convert_ids_to_tokens(encoding["input_ids"][0])
+            # Обрабатываем результаты
+            text_annotations = response.full_text_annotation
+            table_annotations = response.table_annotations
 
-            filtered_predictions = []
-            for token, prediction in zip(tokens, predictions[0]):
-                if not token.startswith("["):
-                    filtered_predictions.append((token, prediction.item()))
+            logger.info(f"Распознано {len(text_annotations.pages) if text_annotations.pages else 0} страниц текста")
+            logger.info(f"Найдено {len(table_annotations)} таблиц")
 
-            logger.info("Обработано при использовании LayoutLMv3")
-            return filtered_predictions
+            return response
 
         except Exception as e:
-            logger.error(f"Ошибка при использовании LayoutLMv3: {e}")
+            logger.error(f"Ошибка при использовании Google Cloud Vision: {e}")
+            return None
+
+    def extract_table_data_from_vision_response(self, response):
+        """Извлекает данные таблицы из ответа Google Cloud Vision."""
+        if not response or not response.table_annotations:
+            return []
+
+        tables_data = []
+
+        try:
+            for table in response.table_annotations:
+                table_data = []
+                for row in table.header_rows:
+                    row_data = []
+                    for cell in row.cells:
+                        cell_text = ""
+                        for paragraph in cell.layout.text_anchor:
+                            # Извлечение текста из ячейки
+                            # Это упрощенная реализация, может потребоваться доработка
+                            cell_text += str(paragraph)  # Заглушка
+                        row_data.append(cell_text)
+                    table_data.append(row_data)
+
+                for row in table.body_rows:
+                    row_data = []
+                    for cell in row.cells:
+                        cell_text = ""
+                        # Извлечение текста из ячейки
+                        # Реализация зависит от структуры ответа API
+                        row_data.append(cell_text)
+                    table_data.append(row_data)
+
+                tables_data.append(table_data)
+
+            return tables_data
+
+        except Exception as e:
+            logger.error(f"Ошибка извлечения данных таблицы: {e}")
             return []
 
     def validate_field(self, field_name, value):
@@ -292,8 +326,16 @@ class InvoiceProcessor:
                 # Предобработка изображения
                 processed_image = self.preprocess_image(image)
 
-                # Распознавание с помощью LayoutLMv3 (если доступно)
-                layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
+                # Конвертируем обратно в байты для Google Cloud Vision
+                img_byte_arr = io.BytesIO()
+                processed_image.save(img_byte_arr, format='PNG')
+                img_byte_arr = img_byte_arr.getvalue()
+
+                # Распознавание с помощью Google Cloud Vision (если доступно)
+                vision_response = self.recognize_layout_with_google_vision(img_byte_arr)
+
+                # Извлечение данных таблицы
+                table_data = self.extract_table_data_from_vision_response(vision_response)
 
                 # OCR
                 text = self.ocr_image(processed_image, lang)
@@ -335,10 +377,11 @@ class InvoiceProcessor:
             # Предобработка изображения
             processed_image = self.preprocess_image(image)
 
-            # Распознавание с помощью LayoutLMv3 (если доступно)
-            layout_predictions = self.recognize_layout_with_layoutlmv3(processed_image)
-            logger.info("Распознанный текст с изображения (первые 500 символов):")
-            logger.info(layout_predictions[:500] if len(layout_predictions) > 500 else layout_predictions)
+            # Распознавание с помощью Google Cloud Vision (если доступно)
+            vision_response = self.recognize_layout_with_google_vision(image_bytes)
+
+            # Извлечение данных таблицы
+            table_data = self.extract_table_data_from_vision_response(vision_response)
 
             # OCR
             text = self.ocr_image(processed_image, lang)
