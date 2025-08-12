@@ -6,8 +6,8 @@ import logging
 from PIL import Image
 import pytesseract
 import fitz  # PyMuPDF
-from google.cloud import vision
-import io
+import requests
+import base64
 import json
 
 # Настройка логирования
@@ -24,15 +24,12 @@ class InvoiceProcessor:
         self.templates_dir = templates_dir
         self.validation_rules = self.load_validation_rules()
 
-        # Инициализация клиента Google Cloud Vision
-        try:
-            # Убедитесь, что у вас установлен файл учетных данных Google Cloud
-            # и установлена переменная окружения GOOGLE_APPLICATION_CREDENTIALS
-            self.vision_client = vision.ImageAnnotatorClient()
-            logger.info("Google Cloud Vision клиент инициализирован")
-        except Exception as e:
-            logger.error(f"Ошибка инициализации Google Cloud Vision: {e}")
-            self.vision_client = None
+        # Инициализация Яндекс Cloud Vision
+        self.yandex_api_key = os.getenv("YANDEX_API_KEY")  # Установите переменную окружения
+        if self.yandex_api_key:
+            logger.info("Яндекс Cloud Vision API ключ найден")
+        else:
+            logger.warning("Яндекс Cloud Vision API ключ не найден. Установите переменную окружения YANDEX_API_KEY")
 
     def load_validation_rules(self):
         """Загружает правила валидации из CSV файла."""
@@ -83,19 +80,89 @@ class InvoiceProcessor:
             logger.error(f"Ошибка создания правил валидации: {e}")
 
     def ocr_image(self, image, lang='rus+eng'):
-        """Распознаёт текст с изображения с помощью Tesseract OCR."""
+        """Распознаёт текст с изображения."""
         try:
-            custom_config = r'--oem 3 --psm 6'
-            text = pytesseract.image_to_string(image, lang=lang, config=custom_config)
-            return text.strip()
+            # Если доступен Яндекс Cloud Vision, используем его
+            if self.yandex_api_key:
+                logger.info("Использую Яндекс Cloud Vision для распознавания")
+                return self.yandex_vision_ocr(image)
+            else:
+                # Используем Tesseract OCR
+                logger.info("Использую Tesseract OCR для распознавания")
+                custom_config = r'--oem 3 --psm 6'
+                text = pytesseract.image_to_string(image, lang=lang, config=custom_config)
+                return text.strip()
         except Exception as e:
             logger.error(f"Ошибка OCR: {e}")
+            return ""
+
+    def yandex_vision_ocr(self, image):
+        """Распознаёт текст с изображения с помощью Яндекс Cloud Vision."""
+        try:
+            # Конвертируем изображение в JPEG
+            if isinstance(image, str):
+                image = Image.open(image)
+
+            # Сохраняем изображение в байты
+            img_byte_arr = BytesIO()
+            image.save(img_byte_arr, format='JPEG')
+            img_bytes = img_byte_arr.getvalue()
+
+            # Кодируем в base64
+            encoded_image = base64.b64encode(img_bytes).decode('utf-8')
+
+            # Подготавливаем запрос
+            url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+            headers = {
+                "Authorization": f"Api-Key {self.yandex_api_key}",
+                "Content-Type": "application/json"
+            }
+
+            payload = {
+                "analyzeSpecs": [{
+                    "content": encoded_image,
+                    "features": [{
+                        "type": "TEXT_DETECTION",
+                        "textDetectionConfig": {
+                            "languageCodes": ["ru", "en"]
+                        }
+                    }]
+                }]
+            }
+
+            # Отправляем запрос
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+
+            # Обрабатываем ответ
+            result = response.json()
+
+            # Извлекаем текст
+            text = ""
+            if "results" in result and len(result["results"]) > 0:
+                annotations = result["results"][0].get("textDetection", {}).get("pages", [])
+                for page in annotations:
+                    for block in page.get("blocks", []):
+                        for line in block.get("lines", []):
+                            for word in line.get("words", []):
+                                if "text" in word:
+                                    text += word["text"] + " "
+                            text += "\n"
+
+            return text.strip()
+
+        except Exception as e:
+            logger.error(f"Ошибка при использовании Яндекс Cloud Vision: {e}")
             return ""
 
     def preprocess_image(self, image):
         """Предобработка изображения для улучшения OCR."""
         if isinstance(image, str):
             image = Image.open(image)
+
+        # Конвертируем в grayscale если нужно
+        if image.mode != 'L':
+            image = image.convert('L')
 
         # Увеличиваем резкость
         from PIL import ImageEnhance
@@ -107,79 +174,6 @@ class InvoiceProcessor:
         image = enhancer.enhance(1.5)
 
         return image
-
-    def recognize_layout_with_google_vision(self, image_bytes):
-        """Использует Google Cloud Vision для распознавания текста и структуры."""
-        if not self.vision_client:
-            logger.warning("Google Cloud Vision не инициализирован, пропускаю распознавание")
-            return []
-
-        try:
-            # Создаем объект изображения для Google Cloud Vision
-            image = vision.Image(content=image_bytes)
-
-            # Настраиваем функции распознавания
-            features = [
-                vision.Feature(type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION),
-                vision.Feature(type_=vision.Feature.Type.TABLE_DETECTION)
-            ]
-
-            # Создаем запрос
-            request = vision.AnnotateImageRequest(image=image, features=features)
-
-            # Выполняем запрос
-            response = self.vision_client.annotate_image(request=request)
-
-            # Обрабатываем результаты
-            text_annotations = response.full_text_annotation
-            table_annotations = response.table_annotations
-
-            logger.info(f"Распознано {len(text_annotations.pages) if text_annotations.pages else 0} страниц текста")
-            logger.info(f"Найдено {len(table_annotations)} таблиц")
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Ошибка при использовании Google Cloud Vision: {e}")
-            return None
-
-    def extract_table_data_from_vision_response(self, response):
-        """Извлекает данные таблицы из ответа Google Cloud Vision."""
-        if not response or not response.table_annotations:
-            return []
-
-        tables_data = []
-
-        try:
-            for table in response.table_annotations:
-                table_data = []
-                for row in table.header_rows:
-                    row_data = []
-                    for cell in row.cells:
-                        cell_text = ""
-                        for paragraph in cell.layout.text_anchor:
-                            # Извлечение текста из ячейки
-                            # Это упрощенная реализация, может потребоваться доработка
-                            cell_text += str(paragraph)  # Заглушка
-                        row_data.append(cell_text)
-                    table_data.append(row_data)
-
-                for row in table.body_rows:
-                    row_data = []
-                    for cell in row.cells:
-                        cell_text = ""
-                        # Извлечение текста из ячейки
-                        # Реализация зависит от структуры ответа API
-                        row_data.append(cell_text)
-                    table_data.append(row_data)
-
-                tables_data.append(table_data)
-
-            return tables_data
-
-        except Exception as e:
-            logger.error(f"Ошибка извлечения данных таблицы: {e}")
-            return []
 
     def validate_field(self, field_name, value):
         """Валидирует значение поля по правилам."""
@@ -326,17 +320,6 @@ class InvoiceProcessor:
                 # Предобработка изображения
                 processed_image = self.preprocess_image(image)
 
-                # Конвертируем обратно в байты для Google Cloud Vision
-                img_byte_arr = io.BytesIO()
-                processed_image.save(img_byte_arr, format='PNG')
-                img_byte_arr = img_byte_arr.getvalue()
-
-                # Распознавание с помощью Google Cloud Vision (если доступно)
-                vision_response = self.recognize_layout_with_google_vision(img_byte_arr)
-
-                # Извлечение данных таблицы
-                table_data = self.extract_table_data_from_vision_response(vision_response)
-
                 # OCR
                 text = self.ocr_image(processed_image, lang)
                 all_text += text + "\n\n"  # Собираем весь текст для отладки
@@ -376,12 +359,6 @@ class InvoiceProcessor:
 
             # Предобработка изображения
             processed_image = self.preprocess_image(image)
-
-            # Распознавание с помощью Google Cloud Vision (если доступно)
-            vision_response = self.recognize_layout_with_google_vision(image_bytes)
-
-            # Извлечение данных таблицы
-            table_data = self.extract_table_data_from_vision_response(vision_response)
 
             # OCR
             text = self.ocr_image(processed_image, lang)
