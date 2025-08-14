@@ -112,10 +112,11 @@ class InvoiceProcessor:
             encoded_image = base64.b64encode(img_bytes).decode('utf-8')
 
             # Подготавливаем запрос
-            url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+            url = "https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText"
             headers = {
                 "Authorization": f"Api-Key {self.yandex_api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "x-data-logging-enabled": "true"
             }
 
             payload = {
@@ -130,24 +131,32 @@ class InvoiceProcessor:
                 }]
             }
 
+            data = {
+                    "mimeType": "JPEG",
+                    "languageCodes": ["ru", "en"],
+                    "model": "table",
+                    "content": encoded_image
+                    }
+
             # Отправляем запрос
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, data=json.dumps(data))
             response.raise_for_status()
 
             # Обрабатываем ответ
             result = response.json()
+            logger.info(f"Ответ Yandex Cloud (первые 5000 символов):")
+            logger.info(response.text[:5000] if len(response.text) > 5000 else response.text)
 
             # Извлекаем текст
             text = ""
-            if "results" in result and len(result["results"]) > 0:
-                annotations = result["results"][0].get("textDetection", {}).get("pages", [])
-                for page in annotations:
-                    for block in page.get("blocks", []):
-                        for line in block.get("lines", []):
-                            for word in line.get("words", []):
-                                if "text" in word:
-                                    text += word["text"] + " "
-                            text += "\n"
+            if "result" in result:
+                blocks = result["result"].get("blocks", [])
+                for block in blocks:
+                    for line in block.get("lines", []):
+                        for word in line.get("words", []):
+                            if "text" in word:
+                                text += word["text"] + " "
+                        text += "\n"
 
             return text.strip()
 
@@ -324,8 +333,8 @@ class InvoiceProcessor:
                 text = self.ocr_image(processed_image, lang)
                 all_text += text + "\n\n"  # Собираем весь текст для отладки
 
-                logger.info(f"Распознанный текст со страницы {page_num + 1} (первые 500 символов):")
-                logger.info(text[:500] if len(text) > 500 else text)
+                logger.info(f"Распознанный текст со страницы {page_num + 1} (первые 5000 символов):")
+                logger.info(text[:5000] if len(text) > 5000 else text)
 
                 text_lines = text.splitlines()
 
