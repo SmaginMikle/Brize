@@ -147,22 +147,34 @@ class InvoiceProcessor:
             logger.info(f"Ответ Yandex Cloud (первые 5000 символов):")
             logger.info(response.text[:5000] if len(response.text) > 5000 else response.text)
 
-            # Извлекаем текст
-            text = ""
-            if "result" in result:
-                blocks = result["result"].get("blocks", [])
-                for block in blocks:
-                    for line in block.get("lines", []):
-                        for word in line.get("words", []):
-                            if "text" in word:
-                                text += word["text"] + " "
-                        text += "\n"
+            # Извлекаем все значения полей с тегом "text"
+            text_values = self.extract_all_text_fields(result)
 
-            return text.strip()
+            return "\n".join(text_values)
 
         except Exception as e:
             logger.error(f"Ошибка при использовании Яндекс Cloud Vision: {e}")
             return ""
+
+    def extract_all_text_fields(self, data):
+        """Рекурсивно извлекает все значения полей с тегом 'text' из JSON."""
+        text_values = []
+
+        if isinstance(data, dict):
+            # Если текущий элемент - словарь
+            for key, value in data.items():
+                if key == 'text' and isinstance(value, str):
+                    # Если ключ 'text' и значение строка - добавляем в результаты
+                    text_values.append(value)
+                else:
+                    # Рекурсивно обрабатываем вложенные элементы
+                    text_values.extend(self.extract_all_text_fields(value))
+        elif isinstance(data, list):
+            # Если текущий элемент - список
+            for item in data:
+                text_values.extend(self.extract_all_text_fields(item))
+
+        return text_values
 
     def preprocess_image(self, image):
         """Предобработка изображения для улучшения OCR."""
