@@ -9,6 +9,8 @@ import fitz  # PyMuPDF
 import requests
 import base64
 import json
+from datetime import datetime
+from typing import List, Dict
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,6 +32,10 @@ class InvoiceProcessor:
             logger.info("Яндекс Cloud Vision API ключ найден")
         else:
             logger.warning("Яндекс Cloud Vision API ключ не найден. Установите переменную окружения YANDEX_API_KEY")
+
+        # Создаем директорию для сохранения JSON ответов
+        self.debug_dir = "debug_responses"
+        os.makedirs(self.debug_dir, exist_ok=True)
 
     def load_validation_rules(self):
         """Загружает правила валидации из CSV файла."""
@@ -103,6 +109,10 @@ class InvoiceProcessor:
             if isinstance(image, str):
                 image = Image.open(image)
 
+            # Убедимся, что изображение в RGB
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+
             # Сохраняем изображение в байты
             img_byte_arr = BytesIO()
             image.save(img_byte_arr, format='JPEG')
@@ -147,6 +157,9 @@ class InvoiceProcessor:
             logger.info(f"Ответ Yandex Cloud (первые 5000 символов):")
             logger.info(response.text[:5000] if len(response.text) > 5000 else response.text)
 
+            # Сохраняем полный JSON ответ в файл
+            self.save_yandex_response(result, img_bytes)
+
             # Извлекаем все значения полей с тегом "text"
             text_values = self.extract_all_text_fields(result)
 
@@ -155,6 +168,35 @@ class InvoiceProcessor:
         except Exception as e:
             logger.error(f"Ошибка при использовании Яндекс Cloud Vision: {e}")
             return ""
+
+    def save_yandex_response(self, response_data, image_bytes):
+        """Сохраняет полный JSON ответ от Яндекс OCR API в файл."""
+        try:
+            # Создаем уникальное имя файла с временной меткой
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"yandex_ocr_response_{timestamp}.json"
+            filepath = os.path.join(self.debug_dir, filename)
+
+            # Сохраняем JSON ответ
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(response_data, f, ensure_ascii=False, indent=2)
+
+            # Также сохраняем информацию о размере изображения
+            image_info = {
+                "image_size_bytes": len(image_bytes),
+                "saved_at": timestamp,
+                "response_file": filename
+            }
+
+            info_filename = f"yandex_ocr_info_{timestamp}.json"
+            info_filepath = os.path.join(self.debug_dir, info_filename)
+            with open(info_filepath, 'w', encoding='utf-8') as f:
+                json.dump(image_info, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"Полный JSON ответ от Яндекс OCR API сохранен в: {filepath}")
+
+        except Exception as e:
+            logger.error(f"Ошибка сохранения JSON ответа: {e}")
 
     def extract_all_text_fields(self, data):
         """Рекурсивно извлекает все значения полей с тегом 'text' из JSON."""
